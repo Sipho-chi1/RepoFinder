@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from analysis.analyze import run_analysis
 from db.repo_analysis import create_repo_analysis_table
 
+from datetime import date
+
 def pipeline():
     
     load_dotenv()
@@ -17,7 +19,8 @@ def pipeline():
     engine = create_engine("postgresql+psycopg2://postgres:postgres@localhost:5432/repo_finder")
     url = "https://api.github.com/search/repositories?q=created:>2025-01-01+stars:>10+good-first-issues:>1&sort=updated&per_page=100"
     
-    github_client.extract(url,"github_repodata.json")
+    github_client.extract( start=date(2015, 1, 1),   # earliest repo creation date you care about
+    end=date.today(),file="github_repodata.json")
     df = transform.transform()
     load.load(engine,df)
     

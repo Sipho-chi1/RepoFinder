@@ -4,6 +4,8 @@ import pandas as pd
 from sqlalchemy import text
 from analysis.llm_client import ask_gemini
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # Path relative to THIS file, so it works regardless of working directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SQL_PATH = os.path.join(BASE_DIR, "..", "db", "update_repo_analysis.sql")
@@ -79,19 +81,35 @@ def save_analysis(engine, repo_id, issue_number, level, reasoning):
         })
 
 
-def run_analysis(engine, language,rows=3):
+
+
+def process_issue(engine, row, language):
+    """Does the full unit of work for one issue — this is what gets threaded."""
+    prompt = analyze_issue(row["title"], "", row["labels"], language)
+    raw = ask_gemini(prompt)
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
+    result = json.loads(cleaned)
+    save_analysis(engine, row["repo_id"], row["issue_number"],
+                  result["level"], result["reasoning"])
+    return row["full_name"], row["issue_number"], result["level"]
+
+
+def run_analysis(engine, language, rows=3):
     issues = get_issues_to_analyze(engine, language)
-    print(f"Found {rows} un-analysed issues; processing first")
+    print(f"Found {len(issues)} un-analysed issues; processing {rows}")
 
-    for _, row in issues.head(rows).iterrows():
-        prompt = analyze_issue(row["title"], "", row["labels"], language)
-        try:
-            raw = ask_gemini(prompt)
-            cleaned = raw.replace("```json", "").replace("```", "").strip()
-            result = json.loads(cleaned)
-            save_analysis(engine, row["repo_id"], row["issue_number"],
-                          result["level"], result["reasoning"])
-            print(f"  {row['full_name']} #{row['issue_number']}: {result['level']}")
-        except Exception as e:
-            print(f"  Failed on #{row['issue_number']}: {e}")
+    batch = issues.head(rows)
 
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(process_issue, engine, row, language): row
+            for _, row in batch.iterrows()
+        }
+
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                full_name, issue_number, level = future.result()
+                print(f"  {full_name} #{issue_number}: {level}")
+            except Exception as e:
+                print(f"  Failed on #{row['issue_number']}: {e}")
